@@ -1,0 +1,86 @@
+/* 1. 用户表 (系统登录) */ 
+CREATE TABLE users ( 
+user_id BIGINT AUTO_INCREMENT PRIMARY KEY, 
+username VARCHAR(50) NOT NULL UNIQUE, 
+password VARCHAR(100) NOT NULL, -- 实际存储哈希值 
+role VARCHAR(20) NOT NULL -- 'admin', 'doctor', 'staff' 
+); 
+/* 2. 科室表 */ 
+CREATE TABLE departments ( 
+dept_id INT AUTO_INCREMENT PRIMARY KEY, 
+dept_name VARCHAR(50) NOT NULL, 
+location VARCHAR(100) 
+); 
+/* 3. 医生信息表 [cite: 189] */ 
+CREATE TABLE doctors ( 
+    doctor_id BIGINT AUTO_INCREMENT PRIMARY KEY, 
+    user_id BIGINT NOT NULL, 
+    dept_id INT NOT NULL, 
+    name VARCHAR(50) NOT NULL, 
+    title VARCHAR(20), -- 主任医师/主治医师 
+    status TINYINT DEFAULT 1, -- 1在职 
+    FOREIGN KEY (user_id) REFERENCES users(user_id), 
+    FOREIGN KEY (dept_id) REFERENCES departments(dept_id) 
+); 
+ 
+/* 4. 患者信息表 [cite: 186] */ 
+CREATE TABLE patients ( 
+    patient_id BIGINT AUTO_INCREMENT PRIMARY KEY, 
+    name VARCHAR(50) NOT NULL, 
+    gender CHAR(1) NOT NULL, -- M/F 
+    id_card VARCHAR(18) UNIQUE NOT NULL, -- 身份证，核心索引 
+    phone VARCHAR(15) NOT NULL, 
+    dob DATE, -- 出生日期 
+    password VARCHAR(50) DEFAULT '123456' -- 患者简单登录密码 
+); 
+ 
+/* 5. 排班表 [cite: 193] */ 
+CREATE TABLE schedules ( 
+    schedule_id BIGINT AUTO_INCREMENT PRIMARY KEY, 
+    doctor_id BIGINT NOT NULL, 
+    work_date DATE NOT NULL, 
+    shift_type TINYINT NOT NULL, -- 1:上午, 2:下午 
+    quota INT DEFAULT 30, -- 总号源 
+    remaining INT, -- 剩余号源 
+    FOREIGN KEY (doctor_id) REFERENCES doctors(doctor_id), 
+    UNIQUE KEY idx_doc_date_shift (doctor_id, work_date, shift_type) -- 复合索引 
+); 
+ 
+/* 6. 预约记录表 [cite: 196] */ 
+CREATE TABLE appointments ( 
+    appoint_id BIGINT AUTO_INCREMENT PRIMARY KEY, 
+    patient_id BIGINT NOT NULL, 
+    schedule_id BIGINT NOT NULL, 
+    status TINYINT DEFAULT 0, -- 0:预约成功, 1:已完成, 2:已取消 
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP, 
+    est_arrival VARCHAR(10), -- 预计到达时间 
+    FOREIGN KEY (patient_id) REFERENCES patients(patient_id), 
+    FOREIGN KEY (schedule_id) REFERENCES schedules(schedule_id) 
+); 
+ 
+/* 7. 就诊/挂号记录表 [cite: 200] */ 
+CREATE TABLE encounters ( 
+    encounter_id BIGINT AUTO_INCREMENT PRIMARY KEY, 
+    patient_id BIGINT NOT NULL, 
+    doctor_id BIGINT NOT NULL, 
+    appoint_id BIGINT, -- 可为空，为空则为现场挂号 
+    visit_status TINYINT DEFAULT 0, -- 0:候诊, 1:就诊中, 2:待缴费, 3:结束 [cite: 202] 
+    queue_number INT NOT NULL, -- 排队号 
+    symptom TEXT, -- 主诉 
+    diagnosis TEXT, -- 诊断结果 
+    check_in_time DATETIME DEFAULT CURRENT_TIMESTAMP, 
+    FOREIGN KEY (patient_id) REFERENCES patients(patient_id), 
+    FOREIGN KEY (doctor_id) REFERENCES doctors(doctor_id) 
+); 
+ 
+/* 8. 账单表 [cite: 203] */ 
+CREATE TABLE bills ( 
+    bill_id BIGINT AUTO_INCREMENT PRIMARY KEY, 
+    encounter_id BIGINT UNIQUE NOT NULL, 
+    total_amt DECIMAL(10,2) NOT NULL, 
+    insurance_amt DECIMAL(10,2) DEFAULT 0, 
+    self_pay_amt DECIMAL(10,2) NOT NULL, 
+    pay_status TINYINT DEFAULT 0, -- 0:未付, 1:已付 
+    pay_time DATETIME, 
+    FOREIGN KEY (encounter_id) REFERENCES encounters(encounter_id) 
+);
