@@ -1,0 +1,439 @@
+from flask import Flask, render_template_string, request, session, redirect, url_for, flash
+import pymysql
+from datetime import datetime
+
+app = Flask(__name__)
+app.secret_key = 'super_secret_key'
+
+# 数据库配置
+DB_CONFIG = {'host': 'localhost', 'user': 'root', 'password': '@Zhx4588%', 'db': 'hospital', 'charset': 'utf8mb4', 'cursorclass': pymysql.cursors.DictCursor}
+
+def get_db():
+    return pymysql.connect(**DB_CONFIG)
+
+# --- 简单的 HTML 模板 (内嵌以方便复制运行) ---
+# 包含：登录页、角色主页、各类表单
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>社区医院门诊管理系统</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f0f2f5; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 12px 0 rgba(0,0,0,0.1); }
+        .nav { margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+        .btn { padding: 5px 15px; background: #409EFF; color: white; text-decoration: none; border-radius: 4px; border: none; cursor: pointer;}
+        .btn-green { background: #67C23A; }
+        .btn-red { background: #F56C6C; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #ebeef5; padding: 8px; text-align: left; }
+        th { background-color: #f5f7fa; }
+        .flash { padding: 10px; background: #e1f3d8; color: #67c23a; margin-bottom: 10px; border-radius: 4px;}
+        .card { border: 1px solid #eee; padding: 15px; margin-bottom: 15px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav">
+            <h2>中山大学社区医院门诊系统 (CHOMS)</h2>
+            {% if session.get('user') %}
+                <p>欢迎, {{ session['user']['name'] }} ({{ session['user']['role'] }}) | <a href="/logout">退出</a></p>
+            {% endif %}
+        </div>
+        
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="flash">{{ messages[0] }}</div>
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>
+"""
+
+# --- 路由逻辑 ---
+
+@app.route('/')
+def index():
+    if not session.get('user'):
+        return render_template_string(HTML_TEMPLATE.replace('{% block content %}{% endblock %}', """
+            <h3>系统登录</h3>
+            <form action="/login" method="post">
+                <p>账号: <input type="text" name="username" placeholder="患者身份证/员工账号"></p>
+                <p>密码: <input type="password" name="password"></p>
+                <p>角色: 
+                    <select name="role">
+                        <option value="patient">患者</option>
+                        <option value="staff">前台/收费</option>
+                        <option value="doctor">医生</option>
+                        <option value="admin">管理员</option>
+                    </select>
+                </p>
+                <button class="btn">登录</button>
+            </form>
+            <div style="margin-top:20px; color:gray;">
+                <p>测试账号提示:</p>
+                <ul>
+                    <li>管理员: admin / admin</li>
+                    <li>前台: staff1 / 123456</li>
+                    <li>医生: doc1 / 123456</li>
+                    <li>患者: 任意数据库生成的身份证 / 123456</li>
+                </ul>
+            </div>
+        """))
+    
+    role = session['user']['role']
+    if role == 'patient': return redirect('/patient_dashboard')
+    if role == 'staff': return redirect('/staff_dashboard')
+    if role == 'doctor': return redirect('/doctor_dashboard')
+    if role == 'admin': return redirect('/admin_dashboard')
+    return "Unknown Role"
+
+@app.route('/login', methods=['POST'])
+def login():
+    username = request.form['username']
+    password = request.form['password']
+    role = request.form['role']
+    
+    conn = get_db()
+    try:
+        if role == 'patient':
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM patients WHERE id_card=%s AND password=%s", (username, password))
+                user = cursor.fetchone()
+                if user:
+                    session['user'] = {'id': user['patient_id'], 'name': user['name'], 'role': 'patient'}
+                    return redirect('/')
+        else:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM users WHERE username=%s AND password=%s AND role=%s", (username, password, role))
+                user = cursor.fetchone()
+                if user:
+                    # 获取具体身份ID
+                    real_id = user['user_id']
+                    name = user['username']
+                    if role == 'doctor':
+                        cursor.execute("SELECT doctor_id, name FROM doctors WHERE user_id=%s", (user['user_id'],))
+                        doc = cursor.fetchone()
+                        real_id = doc['doctor_id']
+                        name = doc['name']
+
+                    session['user'] = {'id': real_id, 'name': name, 'role': role}
+                    return redirect('/')
+        flash('登录失败，请检查账号密码')
+        return redirect('/')
+    finally:
+        conn.close()
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/')
+
+# --- 1. 患者模块 (预约功能) ---
+@app.route('/patient_dashboard')
+def patient_dashboard():
+    conn = get_db()
+    with conn.cursor() as cursor:
+        # 查询未来排班
+        cursor.execute("""
+            SELECT s.*, d.name as doc_name, dept.dept_name 
+            FROM schedules s 
+            JOIN doctors d ON s.doctor_id = d.doctor_id 
+            JOIN departments dept ON d.dept_id = dept.dept_id
+            WHERE s.work_date >= CURDATE() AND s.remaining > 0
+            ORDER BY s.work_date
+        """)
+        schedules = cursor.fetchall()
+        
+        # 查询我的预约
+        cursor.execute("""
+            SELECT a.*, d.name as doc_name, s.work_date 
+            FROM appointments a 
+            JOIN schedules s ON a.schedule_id = s.schedule_id 
+            JOIN doctors d ON s.doctor_id = d.doctor_id
+            WHERE a.patient_id = %s
+        """, (session['user']['id'],))
+        my_appts = cursor.fetchall()
+    conn.close()
+    
+    return render_template_string(HTML_TEMPLATE.replace('{% block content %}{% endblock %}', """
+        <h3>我的预约</h3>
+        <table>
+            <tr><th>日期</th><th>医生</th><th>状态</th></tr>
+            {% for a in my_appts %}
+            <tr>
+                <td>{{ a.work_date }}</td>
+                <td>{{ a.doc_name }}</td>
+                <td>
+                    {% if a.status == 0 %}已预约{% elif a.status == 1 %}已完成{% else %}已取消{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+
+        <h3>可预约排班</h3>
+        <table>
+            <tr><th>科室</th><th>医生</th><th>日期</th><th>时段</th><th>剩余</th><th>操作</th></tr>
+            {% for s in schedules %}
+            <tr>
+                <td>{{ s.dept_name }}</td>
+                <td>{{ s.doc_name }}</td>
+                <td>{{ s.work_date }}</td>
+                <td>{{ '上午' if s.shift_type==1 else '下午' }}</td>
+                <td>{{ s.remaining }}</td>
+                <td>
+                    <form action="/book_appt" method="post">
+                        <input type="hidden" name="schedule_id" value="{{ s.schedule_id }}">
+                        <button class="btn">预约</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    """), my_appts=my_appts, schedules=schedules)
+
+@app.route('/book_appt', methods=['POST'])
+def book_appt():
+    sch_id = request.form['schedule_id']
+    pat_id = session['user']['id']
+    conn = get_db()
+    try:
+        with conn.cursor() as cursor:
+            # 扣减库存
+            rows = cursor.execute("UPDATE schedules SET remaining = remaining - 1 WHERE schedule_id=%s AND remaining > 0", (sch_id,))
+            if rows > 0:
+                cursor.execute("INSERT INTO appointments (patient_id, schedule_id, est_arrival) VALUES (%s, %s, '09:00')", (pat_id, sch_id))
+                conn.commit()
+                flash('预约成功！')
+            else:
+                flash('预约失败：号源已满')
+    finally:
+        conn.close()
+    return redirect('/patient_dashboard')
+
+# --- 2. 前台模块 (挂号/签到/收费) ---
+@app.route('/staff_dashboard')
+def staff_dashboard():
+    conn = get_db()
+    with conn.cursor() as cursor:
+        # 今日预约列表 (待签到)
+        cursor.execute("""
+            SELECT a.appoint_id, p.name, p.id_card, d.name as doc_name 
+            FROM appointments a
+            JOIN patients p ON a.patient_id = p.patient_id
+            JOIN schedules s ON a.schedule_id = s.schedule_id
+            JOIN doctors d ON s.doctor_id = d.doctor_id
+            WHERE a.status = 0 AND s.work_date = CURDATE()
+        """)
+        today_appts = cursor.fetchall()
+
+        # 待缴费账单
+        cursor.execute("""
+            SELECT b.bill_id, p.name, b.total_amt, b.pay_status 
+            FROM bills b
+            JOIN encounters e ON b.encounter_id = e.encounter_id
+            JOIN patients p ON e.patient_id = p.patient_id
+            WHERE b.pay_status = 0
+        """)
+        unpaid_bills = cursor.fetchall()
+    conn.close()
+
+    return render_template_string(HTML_TEMPLATE.replace('{% block content %}{% endblock %}', """
+        <div style="display:flex; gap:20px;">
+            <div style="flex:1;">
+                <h3>预约签到 (今日)</h3>
+                <table>
+                    <tr><th>患者</th><th>医生</th><th>操作</th></tr>
+                    {% for a in today_appts %}
+                    <tr>
+                        <td>{{ a.name }}<br><small>{{ a.id_card }}</small></td>
+                        <td>{{ a.doc_name }}</td>
+                        <td><a href="/check_in/{{ a.appoint_id }}" class="btn btn-green">签到/生成就诊号</a></td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+            <div style="flex:1;">
+                <h3>收费处</h3>
+                <table>
+                    <tr><th>患者</th><th>金额</th><th>操作</th></tr>
+                    {% for b in unpaid_bills %}
+                    <tr>
+                        <td>{{ b.name }}</td>
+                        <td>￥{{ b.total_amt }}</td>
+                        <td><a href="/pay_bill/{{ b.bill_id }}" class="btn">收费</a></td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
+    """), today_appts=today_appts, unpaid_bills=unpaid_bills)
+
+@app.route('/check_in/<int:appoint_id>')
+def check_in(appoint_id):
+    # 将预约转为就诊记录 
+    conn = get_db()
+    try:
+        with conn.cursor() as cursor:
+            # 获取预约详情
+            cursor.execute("SELECT * FROM appointments a JOIN schedules s ON a.schedule_id=s.schedule_id WHERE appoint_id=%s", (appoint_id,))
+            appt = cursor.fetchone()
+            
+            # 生成排队号
+            queue_num = cursor.execute("SELECT * FROM encounters WHERE doctor_id=%s AND visit_status < 3", (appt['doctor_id'],)) + 1
+            
+            # 插入 Encounter
+            cursor.execute("""
+                INSERT INTO encounters (patient_id, doctor_id, appoint_id, visit_status, queue_number)
+                VALUES (%s, %s, %s, 0, %s)
+            """, (appt['patient_id'], appt['doctor_id'], appoint_id, queue_num))
+            
+            # 更新预约状态
+            cursor.execute("UPDATE appointments SET status=1 WHERE appoint_id=%s", (appoint_id,))
+            conn.commit()
+            flash('签到成功，患者已进入候诊队列')
+    finally:
+        conn.close()
+    return redirect('/staff_dashboard')
+
+@app.route('/pay_bill/<int:bill_id>')
+def pay_bill(bill_id):
+    conn = get_db()
+    try:
+        with conn.cursor() as cursor:
+            # 更新支付状态
+            cursor.execute("UPDATE bills SET pay_status=1, pay_time=NOW() WHERE bill_id=%s", (bill_id,))
+            
+            # 更新就诊状态为结束 (3)
+            cursor.execute("""
+                UPDATE encounters e JOIN bills b ON e.encounter_id = b.encounter_id
+                SET e.visit_status = 3
+                WHERE b.bill_id = %s
+            """, (bill_id,))
+            conn.commit()
+            flash('缴费成功')
+    finally:
+        conn.close()
+    return redirect('/staff_dashboard')
+
+# --- 3. 医生模块 (接诊与开单) ---
+@app.route('/doctor_dashboard')
+def doctor_dashboard():
+    doc_id = session['user']['id']
+    conn = get_db()
+    with conn.cursor() as cursor:
+        # 候诊队列
+        cursor.execute("""
+            SELECT e.*, p.name, p.gender, p.dob 
+            FROM encounters e 
+            JOIN patients p ON e.patient_id = p.patient_id
+            WHERE e.doctor_id = %s AND e.visit_status IN (0, 1)
+            ORDER BY e.queue_number
+        """, (doc_id,))
+        queue = cursor.fetchall()
+    conn.close()
+    
+    return render_template_string(HTML_TEMPLATE.replace('{% block content %}{% endblock %}', """
+        <h3>我的候诊队列</h3>
+        <table>
+            <tr><th>排队号</th><th>患者</th><th>状态</th><th>操作</th></tr>
+            {% for p in queue %}
+            <tr>
+                <td>{{ p.queue_number }}</td>
+                <td>{{ p.name }} ({{ p.gender }})</td>
+                <td>
+                    {% if p.visit_status == 0 %} <span style="color:orange">候诊</span>
+                    {% else %} <span style="color:green">就诊中</span> {% endif %}
+                </td>
+                <td>
+                    {% if p.visit_status == 0 %}
+                        <a href="/start_visit/{{ p.encounter_id }}" class="btn">接诊</a>
+                    {% else %}
+                        <button class="btn btn-green" onclick="document.getElementById('diag-{{p.encounter_id}}').style.display='block'">开单/结束</button>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr id="diag-{{p.encounter_id}}" style="display:none; background:#f9f9f9;">
+                <td colspan="4">
+                    <form action="/finish_visit" method="post">
+                        <input type="hidden" name="encounter_id" value="{{ p.encounter_id }}">
+                        <p>诊断: <textarea name="diagnosis" rows="2" style="width:100%"></textarea></p>
+                        <p>总费用(元): <input type="number" name="amount" step="0.1"></p>
+                        <button class="btn btn-red">提交并结束</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    """), queue=queue)
+
+@app.route('/start_visit/<int:eid>')
+def start_visit(eid):
+    conn = get_db()
+    with conn.cursor() as cursor:
+        cursor.execute("UPDATE encounters SET visit_status=1 WHERE encounter_id=%s", (eid,))
+        conn.commit()
+    return redirect('/doctor_dashboard')
+
+@app.route('/finish_visit', methods=['POST'])
+def finish_visit():
+    eid = request.form['encounter_id']
+    diag = request.form['diagnosis']
+    amt = float(request.form['amount'])
+    
+    conn = get_db()
+    try:
+        with conn.cursor() as cursor:
+            # 1. 更新诊断
+            cursor.execute("UPDATE encounters SET diagnosis=%s, visit_status=2 WHERE encounter_id=%s", (diag, eid))
+            # 2. 生成账单
+            ins_amt = amt * 0.4 # 模拟医保报销40%
+            self_amt = amt - ins_amt
+            cursor.execute("""
+                INSERT INTO bills (encounter_id, total_amt, insurance_amt, self_pay_amt)
+                VALUES (%s, %s, %s, %s)
+            """, (eid, amt, ins_amt, self_amt))
+            conn.commit()
+            flash('诊疗结束，账单已发送至收费处')
+    finally:
+        conn.close()
+    return redirect('/doctor_dashboard')
+
+# --- 4. 管理员模块 (报表) ---
+@app.route('/admin_dashboard')
+def admin_dashboard():
+    conn = get_db()
+    with conn.cursor() as cursor:
+        # 统计科室收入 
+        cursor.execute("""
+            SELECT d.dept_name, SUM(b.total_amt) as total
+            FROM bills b
+            JOIN encounters e ON b.encounter_id = e.encounter_id
+            JOIN doctors doc ON e.doctor_id = doc.doctor_id
+            JOIN departments d ON doc.dept_id = d.dept_id
+            GROUP BY d.dept_name
+        """)
+        stats = cursor.fetchall()
+    conn.close()
+    
+    return render_template_string(HTML_TEMPLATE.replace('{% block content %}{% endblock %}', """
+        <h3>医院运营统计 (报表)</h3>
+        <div class="card">
+            <h4>科室总收入排名</h4>
+            <table>
+                <tr><th>科室</th><th>总收入</th></tr>
+                {% for s in stats %}
+                <tr>
+                    <td>{{ s.dept_name }}</td>
+                    <td>￥{{ s.total }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+    """), stats=stats)
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
