@@ -1,0 +1,128 @@
+import pymysql 
+from faker import Faker 
+import random 
+from datetime import datetime, timedelta 
+ 
+# 配置数据库连接 
+db_config = { 
+    'host': 'localhost', 
+    'user': 'root',      # 请修改为你的用户名 
+    'password': 'password', # 请修改为你的密码 
+    'db': 'choms_db', 
+    'charset': 'utf8mb4' 
+} 
+ 
+fake = Faker('zh_CN') 
+ 
+def init_data(): 
+    conn = pymysql.connect(**db_config) 
+    cursor = conn.cursor() 
+     
+    print("开始生成数据...") 
+ 
+    # 1. 初始化科室 
+    depts = ['内科', '外科', '儿科', '妇科', '眼科', '中医科'] 
+    dept_ids = [] 
+    cursor.execute("TRUNCATE TABLE departments") # 清空旧数据 
+    for d in depts: 
+        cursor.execute("INSERT INTO departments (dept_name, location) VALUES (%s, %s)", (d, f"门诊楼
+{random.randint(1,5)}层")) 
+        dept_ids.append(conn.insert_id()) 
+     
+    # 2. 初始化用户和医生 (10位医生, 3位前台, 1位管理员) 
+    cursor.execute("DELETE FROM users")  
+    # Admin 
+    cursor.execute("INSERT INTO users (username, password, role) VALUES ('admin', 'admin', 'admin')") 
+    # Staff 
+    for i in range(3): 
+        cursor.execute(f"INSERT INTO users (username, password, role) VALUES ('staff{i+1}', '123456', 
+'staff')") 
+     
+    # Doctors 
+    doc_ids = [] 
+    for i in range(10): 
+        uname = f"doc{i+1}" 
+        cursor.execute("INSERT INTO users (username, password, role) VALUES (%s, '123456', 'doctor')", 
+(uname,)) 
+        uid = conn.insert_id() 
+        name = fake.name() 
+        dept = random.choice(dept_ids) 
+        title = random.choice(['主任医师', '副主任医师', '主治医师']) 
+        cursor.execute("INSERT INTO doctors (user_id, dept_id, name, title) VALUES (%s, %s, %s, %s)", 
+(uid, dept, name, title)) 
+        doc_ids.append(conn.insert_id()) 
+ 
+    # 3. 初始化患者 (50人) 
+    pat_ids = [] 
+    cursor.execute("DELETE FROM patients") 
+    for _ in range(50): 
+        name = fake.name() 
+        gender = random.choice(['M', 'F']) 
+        id_card = fake.ssn() 
+        phone = fake.phone_number() 
+        dob = fake.date_of_birth(minimum_age=10, maximum_age=90) 
+        cursor.execute("INSERT INTO patients (name, gender, id_card, phone, dob) VALUES (%s, %s, %s, 
+%s, %s)",  
+                       (name, gender, id_card, phone, dob)) 
+        pat_ids.append(conn.insert_id()) 
+ 
+    # 4. 生成排班 (过去7天 + 未来7天) 
+    sch_ids = [] 
+    today = datetime.now().date() 
+    for day_offset in range(-7, 8): 
+        current_date = today + timedelta(days=day_offset) 
+        for doc in doc_ids: 
+            # 每天每位医生随机排上午或下午班 
+            if random.random() > 0.3: 
+                shift = random.choice([1, 2]) 
+                quota = 30 
+                cursor.execute("INSERT INTO schedules (doctor_id, work_date, shift_type, quota, remaining) 
+VALUES (%s, %s, %s, %s, %s)", 
+                               (doc, current_date, shift, quota, quota)) 
+                sch_ids.append((conn.insert_id(), current_date)) 
+ 
+    # 5. 生成预约、就诊记录和账单 (针对过去日期的排班生成已完成数据) 
+    for sch_id, date in sch_ids: 
+        if date < today: 
+            # 过去的排班，生成随机就诊记录 
+            count = random.randint(5, 20) 
+            for _ in range(count): 
+                pat = random.choice(pat_ids) 
+                # 预约 
+                cursor.execute("INSERT INTO appointments (patient_id, schedule_id, status, est_arrival) 
+VALUES (%s, %s, 1, '09:00')",  
+                               (pat, sch_id)) 
+                app_id = conn.insert_id() 
+                # 扣减号源 
+                cursor.execute("UPDATE schedules SET remaining = remaining - 1 WHERE schedule_id=%s", 
+(sch_id,)) 
+                 
+                # 获取医生ID 
+                cursor.execute("SELECT doctor_id FROM schedules WHERE schedule_id=%s", (sch_id,)) 
+                doc_id = cursor.fetchone()[0] 
+ 
+                # 就诊 (状态: 结束) 
+                cursor.execute(""" 
+                    INSERT INTO encounters (patient_id, doctor_id, appoint_id, visit_status, queue_number, 
+diagnosis, check_in_time) 
+                    VALUES (%s, %s, %s, 3, %s, %s, %s) 
+                """, (pat, doc_id, app_id, random.randint(1, 30), "上呼吸道感染", datetime.combine(date, 
+datetime.min.time()))) 
+                enc_id = conn.insert_id() 
+ 
+                # 账单 (已支付) 
+                total = round(random.uniform(50, 500), 2) 
+                ins = round(total * 0.6, 2) 
+                self_pay = total - ins 
+                cursor.execute(""" 
+                    INSERT INTO bills (encounter_id, total_amt, insurance_amt, self_pay_amt, pay_status, 
+pay_time) 
+                    VALUES (%s, %s, %s, %s, 1, %s) 
+                """, (enc_id, total, ins, self_pay, datetime.now())) 
+ 
+    conn.commit() 
+    print("数据生成完毕！包含用户、医生、50+患者及最近两周的完整业务数据。") 
+    conn.close() 
+ 
+if __name__ == "__main__": 
+    init_data()
